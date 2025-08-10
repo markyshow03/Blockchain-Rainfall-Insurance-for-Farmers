@@ -194,3 +194,116 @@
 (define-read-only (get-rainfall-oracle)
   (var-get rainfall-oracle)
 )
+
+
+(define-map location-analytics
+  { location: (string-ascii 50) }
+  {
+    total-policies: uint,
+    total-premiums: uint,
+    total-claims: uint,
+    total-payouts: uint,
+    active-policies: uint
+  }
+)
+
+(define-map global-analytics
+  { key: (string-ascii 20) }
+  { value: uint }
+)
+
+(define-private (init-global-analytics)
+  (begin
+    (map-set global-analytics { key: "total-policies" } { value: u0 })
+    (map-set global-analytics { key: "total-premiums" } { value: u0 })
+    (map-set global-analytics { key: "total-claims" } { value: u0 })
+    (map-set global-analytics { key: "total-payouts" } { value: u0 })
+    (map-set global-analytics { key: "active-policies" } { value: u0 })
+  )
+)
+
+(define-private (update-location-analytics-on-policy (location (string-ascii 50)) (premium uint))
+  (let
+    (
+      (current-stats (default-to 
+        { total-policies: u0, total-premiums: u0, total-claims: u0, total-payouts: u0, active-policies: u0 }
+        (map-get? location-analytics { location: location })
+      ))
+    )
+    (map-set location-analytics
+      { location: location }
+      {
+        total-policies: (+ (get total-policies current-stats) u1),
+        total-premiums: (+ (get total-premiums current-stats) premium),
+        total-claims: (get total-claims current-stats),
+        total-payouts: (get total-payouts current-stats),
+        active-policies: (+ (get active-policies current-stats) u1)
+      }
+    )
+  )
+)
+
+(define-private (update-global-analytics-on-policy (premium uint))
+  (begin
+    (map-set global-analytics { key: "total-policies" } 
+      { value: (+ (get value (unwrap-panic (map-get? global-analytics { key: "total-policies" }))) u1) })
+    (map-set global-analytics { key: "total-premiums" } 
+      { value: (+ (get value (unwrap-panic (map-get? global-analytics { key: "total-premiums" }))) premium) })
+    (map-set global-analytics { key: "active-policies" } 
+      { value: (+ (get value (unwrap-panic (map-get? global-analytics { key: "active-policies" }))) u1) })
+  )
+)
+
+(define-private (update-analytics-on-payout (location (string-ascii 50)) (payout uint))
+  (let
+    (
+      (current-stats (unwrap-panic (map-get? location-analytics { location: location })))
+    )
+    (map-set location-analytics
+      { location: location }
+      (merge current-stats {
+        total-claims: (+ (get total-claims current-stats) u1),
+        total-payouts: (+ (get total-payouts current-stats) payout),
+        active-policies: (- (get active-policies current-stats) u1)
+      })
+    )
+    (map-set global-analytics { key: "total-claims" } 
+      { value: (+ (get value (unwrap-panic (map-get? global-analytics { key: "total-claims" }))) u1) })
+    (map-set global-analytics { key: "total-payouts" } 
+      { value: (+ (get value (unwrap-panic (map-get? global-analytics { key: "total-payouts" }))) payout) })
+    (map-set global-analytics { key: "active-policies" } 
+      { value: (- (get value (unwrap-panic (map-get? global-analytics { key: "active-policies" }))) u1) })
+  )
+)
+
+(define-read-only (get-location-analytics (location (string-ascii 50)))
+  (map-get? location-analytics { location: location })
+)
+
+(define-read-only (get-global-analytics)
+  {
+    total-policies: (get value (unwrap-panic (map-get? global-analytics { key: "total-policies" }))),
+    total-premiums: (get value (unwrap-panic (map-get? global-analytics { key: "total-premiums" }))),
+    total-claims: (get value (unwrap-panic (map-get? global-analytics { key: "total-claims" }))),
+    total-payouts: (get value (unwrap-panic (map-get? global-analytics { key: "total-payouts" }))),
+    active-policies: (get value (unwrap-panic (map-get? global-analytics { key: "active-policies" })))
+  }
+)
+
+(define-read-only (calculate-location-success-rate (location (string-ascii 50)))
+  (let
+    (
+      (stats (map-get? location-analytics { location: location }))
+    )
+    (match stats
+      analytics
+        (if (> (get total-policies analytics) u0)
+          (/ (* (get total-claims analytics) u100) (get total-policies analytics))
+          u0
+        )
+      u0
+    )
+  )
+)
+
+(init-global-analytics)
