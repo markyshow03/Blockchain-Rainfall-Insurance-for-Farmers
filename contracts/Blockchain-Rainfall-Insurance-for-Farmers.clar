@@ -8,6 +8,12 @@
 (define-constant err-threshold-not-met (err u106))
 (define-constant err-invalid-data (err u107))
 
+(define-constant base-premium-rate u5)
+(define-constant risk-multiplier-low u100)
+(define-constant risk-multiplier-medium u150)
+(define-constant risk-multiplier-high u200)
+(define-constant minimum-premium u50)
+
 (define-data-var next-policy-id uint u1)
 (define-data-var contract-balance uint u0)
 (define-data-var rainfall-oracle principal tx-sender)
@@ -306,4 +312,91 @@
   )
 )
 
-(init-global-analytics)
+
+(define-map location-risk-tier
+  { location: (string-ascii 50) }
+  { risk-level: uint, last-updated: uint }
+)
+
+(define-map coverage-pricing
+  { coverage-tier: uint }
+  { base-rate: uint, max-coverage: uint }
+)
+
+(define-private (init-pricing-tiers)
+  (begin
+    (map-set coverage-pricing { coverage-tier: u1 } { base-rate: u3, max-coverage: u1000 })
+    (map-set coverage-pricing { coverage-tier: u2 } { base-rate: u4, max-coverage: u5000 })
+    (map-set coverage-pricing { coverage-tier: u3 } { base-rate: u5, max-coverage: u10000 })
+  )
+)
+
+(define-private (calculate-risk-tier (location (string-ascii 50)))
+  (let
+    (
+      (location-stats (map-get? location-analytics { location: location }))
+    )
+    (match location-stats
+      stats
+        (let
+          (
+            (claim-rate (if (> (get total-policies stats) u0)
+                         (/ (* (get total-claims stats) u100) (get total-policies stats))
+                         u0))
+          )
+          (if (<= claim-rate u20) u1
+            (if (<= claim-rate u40) u2 u3))
+        )
+      u2
+    )
+  )
+)
+
+(define-private (get-risk-multiplier (risk-tier uint))
+  (if (is-eq risk-tier u1) risk-multiplier-low
+    (if (is-eq risk-tier u2) risk-multiplier-medium risk-multiplier-high))
+)
+
+(define-private (get-coverage-tier (coverage uint))
+  (if (<= coverage u1000) u1
+    (if (<= coverage u5000) u2 u3))
+)
+
+(define-public (calculate-recommended-premium (coverage uint) (location (string-ascii 50)))
+  (let
+    (
+      (risk-tier (calculate-risk-tier location))
+      (coverage-tier (get-coverage-tier coverage))
+      (coverage-info (unwrap! (map-get? coverage-pricing { coverage-tier: coverage-tier }) err-invalid-data))
+      (base-calculation (/ (* coverage (get base-rate coverage-info)) u100))
+      (risk-adjusted (/ (* base-calculation (get-risk-multiplier risk-tier)) u100))
+      (final-premium (if (< risk-adjusted minimum-premium) minimum-premium risk-adjusted))
+    )
+    (ok final-premium)
+  )
+)
+
+(define-public (update-location-risk (location (string-ascii 50)))
+  (let
+    (
+      (new-risk-tier (calculate-risk-tier location))
+    )
+    (map-set location-risk-tier
+      { location: location }
+      { risk-level: new-risk-tier, last-updated: stacks-block-height }
+    )
+    (ok new-risk-tier)
+  )
+)
+
+(define-read-only (get-location-risk (location (string-ascii 50)))
+  (map-get? location-risk-tier { location: location })
+)
+
+(define-read-only (get-pricing-info (coverage uint) (location (string-ascii 50)))
+  {
+    recommended-premium: (unwrap-panic (calculate-recommended-premium coverage location)),
+    risk-tier: (calculate-risk-tier location),
+    coverage-tier: (get-coverage-tier coverage)
+  }
+)
