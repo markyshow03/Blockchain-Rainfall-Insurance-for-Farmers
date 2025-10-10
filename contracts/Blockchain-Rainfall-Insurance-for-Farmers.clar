@@ -14,6 +14,14 @@
 (define-constant risk-multiplier-high u200)
 (define-constant minimum-premium u50)
 
+(define-constant err-pool-not-found (err u108))
+(define-constant err-already-member (err u109))
+(define-constant err-not-member (err u110))
+(define-constant err-pool-full (err u111))
+(define-constant max-pool-members u10)
+
+(define-data-var next-pool-id uint u1)
+
 (define-data-var next-policy-id uint u1)
 (define-data-var contract-balance uint u0)
 (define-data-var rainfall-oracle principal tx-sender)
@@ -399,4 +407,83 @@
     risk-tier: (calculate-risk-tier location),
     coverage-tier: (get-coverage-tier coverage)
   }
+)
+
+(define-map insurance-pools
+  { pool-id: uint }
+  {
+    name: (string-ascii 50),
+    creator: principal,
+    total-contributions: uint,
+    total-coverage: uint,
+    member-count: uint,
+    active: bool,
+    created-at: uint
+  }
+)
+
+(define-map pool-members
+  { pool-id: uint, member: principal }
+  { contribution: uint, share-percentage: uint, joined-at: uint }
+)
+
+(define-public (create-insurance-pool (pool-name (string-ascii 50)) (initial-contribution uint))
+  (let
+    (
+      (pool-id (var-get next-pool-id))
+    )
+    (asserts! (>= (stx-get-balance tx-sender) initial-contribution) err-insufficient-payment)
+    (try! (stx-transfer? initial-contribution tx-sender (as-contract tx-sender)))
+    (map-set insurance-pools
+      { pool-id: pool-id }
+      {
+        name: pool-name,
+        creator: tx-sender,
+        total-contributions: initial-contribution,
+        total-coverage: (* initial-contribution u10),
+        member-count: u1,
+        active: true,
+        created-at: stacks-block-height
+      }
+    )
+    (map-set pool-members
+      { pool-id: pool-id, member: tx-sender }
+      { contribution: initial-contribution, share-percentage: u100, joined-at: stacks-block-height }
+    )
+    (var-set next-pool-id (+ pool-id u1))
+    (ok pool-id)
+  )
+)
+
+(define-public (join-insurance-pool (pool-id uint) (contribution uint))
+  (let
+    (
+      (pool (unwrap! (map-get? insurance-pools { pool-id: pool-id }) err-pool-not-found))
+      (existing-membership (map-get? pool-members { pool-id: pool-id, member: tx-sender }))
+      (new-total (+ (get total-contributions pool) contribution))
+      (new-member-count (+ (get member-count pool) u1))
+    )
+    (asserts! (is-none existing-membership) err-already-member)
+    (asserts! (get active pool) err-invalid-data)
+    (asserts! (< (get member-count pool) max-pool-members) err-pool-full)
+    (asserts! (>= (stx-get-balance tx-sender) contribution) err-insufficient-payment)
+    (try! (stx-transfer? contribution tx-sender (as-contract tx-sender)))
+    (map-set pool-members
+      { pool-id: pool-id, member: tx-sender }
+      { contribution: contribution, share-percentage: (/ (* contribution u100) new-total), joined-at: stacks-block-height }
+    )
+    (map-set insurance-pools
+      { pool-id: pool-id }
+      (merge pool { total-contributions: new-total, member-count: new-member-count, total-coverage: (* new-total u10) })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-pool-info (pool-id uint))
+  (map-get? insurance-pools { pool-id: pool-id })
+)
+
+(define-read-only (get-pool-membership (pool-id uint) (member principal))
+  (map-get? pool-members { pool-id: pool-id, member: member })
 )
