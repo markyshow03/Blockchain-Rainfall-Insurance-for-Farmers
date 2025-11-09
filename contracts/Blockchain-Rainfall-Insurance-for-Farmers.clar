@@ -20,6 +20,12 @@
 (define-constant err-pool-full (err u111))
 (define-constant max-pool-members u10)
 
+(define-constant err-not-renewable (err u112))
+(define-constant err-renewal-too-early (err u113))
+
+(define-constant renewal-discount-rate u10)
+(define-constant grace-period-blocks u144)
+
 (define-data-var next-pool-id uint u1)
 
 (define-data-var next-policy-id uint u1)
@@ -486,4 +492,93 @@
 
 (define-read-only (get-pool-membership (pool-id uint) (member principal))
   (map-get? pool-members { pool-id: pool-id, member: member })
+)
+
+(define-map policy-renewals
+  { policy-id: uint }
+  { renewed-to: uint, renewed-at: uint }
+)
+
+(define-map renewal-history
+  { farmer: principal }
+  { total-renewals: uint, consecutive-renewals: uint, last-renewal-block: uint }
+)
+
+(define-public (renew-policy
+  (old-policy-id uint)
+  (new-coverage uint)
+  (new-rainfall-threshold uint)
+  (duration-blocks uint)
+)
+  (let
+    (
+      (old-policy (unwrap! (map-get? policies { policy-id: old-policy-id }) err-not-found))
+      (new-policy-id (var-get next-policy-id))
+      (farmer-history (default-to 
+        { total-renewals: u0, consecutive-renewals: u0, last-renewal-block: u0 }
+        (map-get? renewal-history { farmer: tx-sender })))
+      (base-premium (unwrap! (calculate-recommended-premium new-coverage (get location old-policy)) err-invalid-data))
+      (discount (calculate-renewal-discount (get consecutive-renewals farmer-history)))
+      (final-premium (- base-premium (/ (* base-premium discount) u100)))
+      (start-block stacks-block-height)
+      (end-block (+ stacks-block-height duration-blocks))
+      (already-renewed (map-get? policy-renewals { policy-id: old-policy-id }))
+    )
+    (asserts! (is-eq tx-sender (get farmer old-policy)) err-owner-only)
+    (asserts! (is-none already-renewed) err-already-exists)
+    (asserts! (is-renewable old-policy-id) err-not-renewable)
+    (asserts! (>= (stx-get-balance tx-sender) final-premium) err-insufficient-payment)
+    (try! (stx-transfer? final-premium tx-sender (as-contract tx-sender)))
+    (map-set policies
+      { policy-id: new-policy-id }
+      {
+        farmer: tx-sender,
+        premium: final-premium,
+        coverage: new-coverage,
+        rainfall-threshold: new-rainfall-threshold,
+        start-block: start-block,
+        end-block: end-block,
+        location: (get location old-policy),
+        active: true
+      }
+    )
+    (map-set policy-renewals
+      { policy-id: old-policy-id }
+      { renewed-to: new-policy-id, renewed-at: stacks-block-height }
+    )
+    (map-set renewal-history
+      { farmer: tx-sender }
+      {
+        total-renewals: (+ (get total-renewals farmer-history) u1),
+        consecutive-renewals: (+ (get consecutive-renewals farmer-history) u1),
+        last-renewal-block: stacks-block-height
+      }
+    )
+    (var-set next-policy-id (+ new-policy-id u1))
+    (var-set contract-balance (+ (var-get contract-balance) final-premium))
+    (ok { policy-id: new-policy-id, premium-paid: final-premium, discount-applied: discount })
+  )
+)
+
+(define-private (calculate-renewal-discount (consecutive-renewals uint))
+  (if (>= consecutive-renewals u5) u25
+    (if (>= consecutive-renewals u3) u15
+      (if (>= consecutive-renewals u1) renewal-discount-rate u0)))
+)
+
+(define-private (is-renewable (policy-id uint))
+  (match (map-get? policies { policy-id: policy-id })
+    policy
+      (let ((blocks-until-expiry (- (get end-block policy) stacks-block-height)))
+        (or (<= blocks-until-expiry grace-period-blocks) (<= stacks-block-height (get end-block policy))))
+    false
+  )
+)
+
+(define-read-only (get-renewal-info (policy-id uint))
+  (map-get? policy-renewals { policy-id: policy-id })
+)
+
+(define-read-only (get-farmer-renewal-history (farmer principal))
+  (map-get? renewal-history { farmer: farmer })
 )
